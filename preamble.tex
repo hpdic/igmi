@@ -94,3 +94,10 @@
 \newcommand{\shape}[1]{\texttt{#1}}
 \newcommand{\term}[1]{\textbf{#1}}
 \newcommand{\defn}[1]{\emph{#1}}
+\newcommand{\todo}[1][]{%
+    \if\relax\detokenize{#1}\relax
+        \colorbox{red!12}{\sffamily\bfseries\footnotesize\color{red!75!black}TODO}%
+    \else
+        {\sffamily\bfseries\footnotesize\color{red!75!black}[TODO: #1]}%
+    \fi
+}
