@@ -2,6 +2,7 @@
 Chapter 1 Companion: Minimal Modern LLM Training Loop
 -----------------------------------------------------
 Architecture matches modern decoder-only LLMs (Qwen / DeepSeek building blocks):
+  - Minimal Byte-Pair Encoding (BPE) tokenizer (128 English chars + learned merges)
   - Pre-norm RMSNorm
   - Rotary Positional Embeddings (RoPE)
   - Causal Grouped-Query Attention (GQA) via PyTorch SDPA (FlashAttention on H100)
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 import torch
@@ -36,9 +38,54 @@ CORPUS = (
 )
 
 
+class ToyBPE:
+    """Minimal Byte-Pair Encoding: starts from 128 English characters and merges common pairs."""
+
+    def __init__(self, text: str, num_merges: int = 64):
+        self.merges: list[tuple[tuple[int, int], int]] = []
+        self.id_to_text: dict[int, str] = {i: chr(i) for i in range(128)}
+        ids = [ord(ch) for ch in text]
+        for step in range(num_merges):
+            counts = Counter(zip(ids, ids[1:]))
+            if not counts:
+                break
+            pair, freq = counts.most_common(1)[0]
+            if freq < 2:
+                break
+            new_id = 128 + step
+            ids = self._replace_pair(ids, pair, new_id)
+            self.merges.append((pair, new_id))
+            self.id_to_text[new_id] = self.id_to_text[pair[0]] + self.id_to_text[pair[1]]
+        self.vocab_size = 128 + len(self.merges)
+
+    @staticmethod
+    def _replace_pair(ids: list[int], pair: tuple[int, int], new_id: int) -> list[int]:
+        out: list[int] = []
+        i = 0
+        while i < len(ids):
+            if i + 1 < len(ids) and ids[i] == pair[0] and ids[i + 1] == pair[1]:
+                out.append(new_id)
+                i += 2
+            else:
+                out.append(ids[i])
+                i += 1
+        return out
+
+    def encode(self, text: str) -> list[int]:
+        """CPU front door: turn input text into integer token IDs."""
+        ids = [ord(ch) for ch in text]
+        for pair, new_id in self.merges:
+            ids = self._replace_pair(ids, pair, new_id)
+        return ids
+
+    def decode(self, ids: list[int]) -> str:
+        """CPU back door: map generated integer token IDs back to text."""
+        return "".join(self.id_to_text[i] for i in ids)
+
+
 @dataclass
 class Config:
-    vocab_size: int = 256  # raw UTF-8 bytes (no tokenizer file needed)
+    vocab_size: int = 192  # 128 English characters + 64 learned BPE merges
     seq_len: int = 64
     d_model: int = 128
     n_layers: int = 2
@@ -184,15 +231,17 @@ def make_batch(data: torch.Tensor, batch_size: int, seq_len: int, device: torch.
 
 
 @torch.no_grad()
-def greedy_generate(model: TinyLM, prompt: str, max_new_tokens: int, device: torch.device) -> str:
+def greedy_generate(model: TinyLM, bpe: ToyBPE, prompt: str, max_new_tokens: int, device: torch.device) -> str:
     model.eval()
-    ids = torch.tensor([list(prompt.encode("utf-8"))], dtype=torch.long, device=device)
+    # Front door on CPU: encode text -> integer IDs
+    ids = torch.tensor([bpe.encode(prompt)], dtype=torch.long, device=device)
     for _ in range(max_new_tokens):
         window = ids[:, -model.cfg.seq_len :]
         next_id = model(window)[:, -1, :].argmax(dim=-1, keepdim=True)
         ids = torch.cat([ids, next_id], dim=1)
     model.train()
-    return bytes(ids[0].tolist()).decode("utf-8", errors="replace")
+    # Back door on CPU: decode integer IDs -> text
+    return bpe.decode(ids[0].tolist())
 
 
 def main() -> None:
@@ -214,7 +263,15 @@ def main() -> None:
     use_bf16 = (args.dtype == "bf16") or (args.dtype == "auto" and use_cuda and torch.cuda.is_bf16_supported())
     autocast_dtype = torch.bfloat16 if use_bf16 else torch.float32
 
-    cfg = Config()
+    # Step 1 (offline on CPU): build BPE codebook and pre-tokenize corpus into flat integer IDs
+    bpe = ToyBPE(CORPUS, num_merges=64)
+    corpus_ids = bpe.encode(CORPUS)
+    ratio = len(CORPUS) / len(corpus_ids)
+    sample_merges = [repr(bpe.id_to_text[new_id]) for _, new_id in bpe.merges[:8]]
+    print(f"BPE codebook: 128 chars + {len(bpe.merges)} merges -> V={bpe.vocab_size} | first merges: {', '.join(sample_merges)}")
+    print(f"BPE compression: {len(CORPUS)} chars -> {len(corpus_ids)} tokens ({ratio:.2f}x shorter)")
+
+    cfg = Config(vocab_size=bpe.vocab_size)
     model = TinyLM(cfg).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
@@ -232,7 +289,7 @@ def main() -> None:
         f"total={(w_bf16+g_bf16+adam_fp32)/1e6:.2f} MB"
     )
 
-    data = torch.tensor(list((CORPUS * 4).encode("utf-8")), dtype=torch.long)
+    data = torch.tensor(corpus_ids * 8, dtype=torch.long)
 
     if use_cuda:
         torch.cuda.reset_peak_memory_stats(device)
@@ -255,7 +312,7 @@ def main() -> None:
             print("\nStep 0 tensor shape trace:")
             for line in trace:
                 print(line)
-            print(f"  initial loss={loss.item():.3f} (random guess over 256 bytes = ln(256) = {math.log(256):.3f})\n")
+            print(f"  initial loss={loss.item():.3f} (random guess over {cfg.vocab_size} tokens = ln({cfg.vocab_size}) = {math.log(cfg.vocab_size):.3f})\n")
 
         if step % 50 == 0:
             print(f"step {step:3d}/{args.steps} | loss = {loss.item():.4f}")
@@ -271,7 +328,7 @@ def main() -> None:
         print(f"Peak GPU HBM allocated (weights + grads + AdamW + activations): {peak_mb:.2f} MB")
 
     prompt = "DeepSeek uses "
-    sample = greedy_generate(model, prompt, max_new_tokens=79, device=device)
+    sample = greedy_generate(model, bpe, prompt, max_new_tokens=49, device=device)
     print(f"\nSanity-check continuation:\n  prompt : {prompt!r}\n  output : {sample!r}")
 
 

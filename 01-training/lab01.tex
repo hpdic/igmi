@@ -1,0 +1,103 @@
+\chapter{Minimal LLM Training Loop}
+
+\begin{itemize}
+    \item \term{Goal}: run a complete decoder-only Large Language Model (LLM) training loop from Byte-Pair Encoding (BPE) through AdamW weight updates, inspect live tensor shapes and memory usage, and compare execution on an NVIDIA H100 GPU against a multi-core CPU.
+    \item \term{Companion chapter}: Chapter 1 (\code{01-training/chap01.tex}).
+    \item \term{Source code}: \code{01-training/code/tiny\_train.py} (336 lines, PyTorch only).
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Reference Machine and Environment}
+
+All measurements in this lab manual come from the same development server:
+
+\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y@{}}
+\toprule
+\term{Component} & \term{Specification} \\
+\midrule
+GPU & 1$\times$ NVIDIA H100 (95,830 MiB High-Bandwidth Memory, HBM3; driver 560.35.05) \\
+CPU & Intel Xeon Platinum 8468 (48 logical CPUs) \\
+Host memory & 240 GiB DRAM \\
+Software & PyTorch 2.14.1 built with CUDA 12.6 \\
+\bottomrule
+\end{tabularx}
+\end{minipage}\par\vspace{4pt}
+
+% -----------------------------------------------------------------------------
+\section{Execution Commands}
+
+\begin{itemize}
+    \item The script auto-selects CUDA with 16-bit brain floating-point (BF16) autocast when an NVIDIA GPU is present, and falls back to 32-bit floating point (FP32) on CPU.
+    \item Key command-line flags: \code{--device \{auto, cuda, cpu\}}, \code{--dtype \{auto, bf16, fp32\}}, \code{--steps N} (default 250), \code{--batch-size B} (default 32), and \code{--lr LR} (default 3e-3).
+\end{itemize}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}
+# 1. Default run: NVIDIA H100 with BF16 autocast
+python 01-training/code/tiny_train.py
+
+# 2. NVIDIA H100 forced to FP32 (for precision and HBM comparison)
+python 01-training/code/tiny_train.py --dtype fp32
+
+# 3. CPU execution (FP32)
+python 01-training/code/tiny_train.py --device cpu
+\end{lstlisting}
+\end{minipage}
+
+% -----------------------------------------------------------------------------
+\section{Code Structure and Observed Trace}
+
+\begin{itemize}
+    \item \term{Offline BPE codebook (\code{ToyBPE})}: starts from 128 standard English characters and runs 64 frequency-based merges on the embedded 515-character corpus, reaching vocabulary size \code{V = 192}.
+    \begin{itemize}
+        \item First eight learned merges: \code{'in'}, \code{'s '}, \code{'en'}, \code{'d '}, \code{'e '}, \code{'ti'}, \code{' t'}, and \code{'. '}.
+        \item Corpus compression: \code{515} characters compress to \code{299} tokens (1.72$\times$ shorter).
+        \item Training slices \shape{[B, T]} windows directly from the pre-tokenized integer stream on CPU without invoking BPE inside the loop. Greedy generation at the end runs \code{bpe.encode} on the input prompt and \code{bpe.decode} on the generated integer IDs.
+    \end{itemize}
+    \item \term{Model blocks (\code{TinyLM}, 443,008 parameters)}: mirrors Qwen and DeepSeek building blocks using Root Mean Square Normalization (RMSNorm), Rotary Position Embedding (RoPE), causal Grouped-Query Attention (GQA, 4 query heads sharing 2 Key-Value heads) via PyTorch Scaled Dot-Product Attention (SDPA), and a SwiGLU feed-forward network (\code{L = 2}, \code{D = 128}, \code{D\_ff = 384}).
+    \item \term{Step-0 tensor shape trace printed on stdout}:
+\end{itemize}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}
+tokens (32, 64) -> embed (32, 64, 128)
+Q (32, 4, 64, 32), K/V (32, 2, 64, 32) (GQA 4:2)
+block_out (32, 64, 128) -> logits (32, 64, 192)
+initial loss = 5.374 (uniform random guess over 192 tokens: ln(192) = 5.257)
+\end{lstlisting}
+\end{minipage}
+
+% -----------------------------------------------------------------------------
+\section{Measured Results on H100 and CPU}
+
+All three configurations run 250 AdamW steps with batch size \code{B = 32}, sequence length \code{T = 64}, and fixed random seed \code{42} (514,048 training tokens total):
+
+\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
+\small
+\begin{tabularx}{\linewidth}{@{}l c c c c Y@{}}
+\toprule
+\term{Configuration} & \term{Wall Time} & \term{Tokens per s} & \term{Peak HBM} & \term{Final Loss} & \term{Notes} \\
+\midrule
+H100 (BF16 autocast) & 3.03 s & 169,570 & 107.82 MB & 0.0308 & Lower activation HBM \\
+H100 (FP32) & 2.53 s & 203,049 & 122.71 MB & 0.0310 & Faster at tiny \code{D = 128} \\
+CPU (FP32, 48 cores) & 20.32 s & 25,297 & Host RAM & 0.0310 & 8.0$\times$ slower than H100 \\
+\bottomrule
+\end{tabularx}
+\end{minipage}\par\vspace{4pt}
+
+\begin{itemize}
+    \item \term{Static state versus peak HBM}: the 16-byte mixed-precision static bill for 443,008 parameters is only \code{7.09 MB} (\code{0.89 MB} BF16 weights, \code{0.89 MB} BF16 gradients, and \code{5.32 MB} FP32 AdamW states). Measured peak HBM reaches \code{107.82 MB} in BF16 and \code{122.71 MB} in FP32 because dynamic activations, backpropagation buffers, and CUDA runtime workspaces dominate at small parameter counts.
+    \item \term{Launch overhead versus Tensor Core throughput}: at \code{D = 128}, individual matrix multiplies finish in microseconds; therefore, GPU wall time is dominated by Python dispatch and autocast type-conversion kernels rather than arithmetic throughput. Consequently, FP32 runs slightly faster than BF16 autocast at toy scale (\code{2.53 s} versus \code{3.03 s}), while BF16 still saves \code{14.89 MB} of activation HBM. At real LLM widths (\code{D = 4,096} to \code{8,192}), General Matrix-Matrix Multiplication (GEMM) compute dominates launch overhead and BF16 Tensor Cores deliver up to 15$\times$ higher throughput than FP32.
+    \item \term{Convergence check}: all three runs drop from initial loss \code{5.37} to \code{0.031} and decode identical text from the prompt \code{'DeepSeek uses '}.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Guided Experiments}
+
+\begin{enumerate}
+    \item \term{Activation memory scaling}: re-run with \code{--batch-size 64} and \code{--batch-size 128} on H100 while watching peak HBM. Static state stays fixed at \code{7.09 MB}, whereas peak HBM grows roughly linearly with batch size \code{B}.
+    \item \term{BF16 crossover width}: increase \code{d\_model} in \code{Config} from \code{128} to \code{1024} (and \code{d\_ff} to \code{3072}), then compare \code{--dtype bf16} against \code{--dtype fp32}. Once GEMMs saturate Tensor Cores, BF16 overtakes FP32 decisively in throughput as well as memory.
+    \item \term{BPE codebook trade-off}: change \code{num\_merges} in \code{ToyBPE} from \code{64} to \code{0} (pure character encoding) and \code{128} (larger vocabulary), observing the trade-off between embedding table parameter count and compressed token count.
+\end{enumerate}

@@ -2,6 +2,7 @@
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 \usepackage{microtype}
+\DisableLigatures{encoding = *, family = tt*}
 \usepackage[margin=0.9in, headheight=24pt]{geometry}
 \usepackage{xcolor}
 \usepackage{booktabs}
@@ -32,7 +33,7 @@
 
 % Compact lecture-note list density
 \setlist[itemize]{leftmargin=1.4em, itemsep=2.5pt, parsep=0pt, topsep=3pt}
-\setlist[itemize,2]{label=\textendash, leftmargin=1.2em, itemsep=1.5pt, topsep=1.5pt}
+\setlist[itemize,2]{label=$\circ$, leftmargin=1.2em, itemsep=1.5pt, topsep=1.5pt}
 \setlist[enumerate]{leftmargin=1.6em, itemsep=2.5pt, parsep=0pt, topsep=3pt}
 
 % Clean paragraph & table spacing
@@ -92,3 +93,4 @@
 \newcommand{\code}[1]{\texttt{#1}}
 \newcommand{\shape}[1]{\texttt{#1}}
 \newcommand{\term}[1]{\textbf{#1}}
+\newcommand{\defn}[1]{\emph{#1}}

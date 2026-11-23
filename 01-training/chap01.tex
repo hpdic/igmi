@@ -1,0 +1,256 @@
+\chapter{LLM Training Systems}
+
+\begin{itemize}
+    \item \term{Goal}: explain the execution loop, memory bill, mixed-precision numerics, and multi-GPU partitioning behind training a modern Large Language Model (LLM).
+    \item \term{Running examples}:
+    \begin{itemize}
+        \item \term{Qwen2.5-72B}: clean dense architecture with Grouped-Query Attention (GQA).
+        \item \term{DeepSeek-V3}: 671B total and 37B active Mixture-of-Experts (MoE) architecture with Multi-head Latent Attention (MLA), 8-bit floating-point (FP8) training, and DualPipe scheduling.
+    \end{itemize}
+    \item \term{Companion lab}: Lab 1 (\code{01-training/lab01.tex} and \code{01-training/code/tiny\_train.py}) walks through running the 336-line PyTorch trainer and reports measured NVIDIA H100 and CPU results.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Training Loop}
+
+\begin{itemize}
+    \item \term{Input}: raw text converted by a tokenizer into integer IDs of shape \shape{[B, T]}.
+    \begin{itemize}
+        \item \code{B} denotes batch size (sequences processed together); \code{T} denotes sequence length (typically \code{4,096} to \code{131,072} tokens).
+        \item Vocabulary size \code{V}: \code{152,064} (Qwen2.5), \code{129,280} (DeepSeek-V3), and \code{192} (our toy model: 128 English characters plus 64 learned merges).
+        \item \term{Byte-Pair Encoding (BPE)}: mapping English text to integers faces two bad extremes. Assigning one ID per character keeps the \defn{codebook} tiny (128 standard English characters) yet produces sequences 3$\times$ to 4$\times$ longer, inflating compute and memory. Assigning one ID per whole word keeps sequences short; however, the codebook grows unbounded on rare words, typos, and code names. BPE strikes a frequency-based compromise offline by giving one ID to common pieces (such as \code{t} plus \code{h} becoming \code{th}, then \code{the}) until reaching vocabulary size \code{V}. Frequent words map to one ID while unseen words break into known pieces (such as \code{un}, \code{believ}, and \code{able}).
+        \item \term{Using the BPE codebook in training and inference}: after offline pair merging finishes, the codebook remains a fixed two-way lookup table (\code{text piece} $\leftrightarrow$ \code{integer ID}) executed on CPU. Before training begins, an offline CPU pass converts the entire text corpus into a flat integer stream on disk; the GPU training loop reads \shape{[B, T]} integer slices directly and never invokes BPE. During inference, CPU runs the same codebook twice per request: encoding the prompt string into integer IDs on entry and decoding each generated integer ID back into readable text on exit.
+        \item \term{Tokenizer, embedding table, and neural encoder are distinct}: tokenization runs on CPU with zero learned weights and outputs plain scalar integers, not vectors. Converting IDs to vectors happens next on GPU via \code{nn.Embedding(V, D)}, a learned \defn{embedding table} of shape \shape{[V, D]} (about 2.49 GB in 16-bit brain floating point, BF16, for Qwen2.5) indexed directly as \code{table[id]} to map \shape{[B, T]} integers to \shape{[B, T, D]} float vectors. Pure-text LLMs are decoder-only; neural encoders appear only for non-text modalities such as images and audio.
+    \end{itemize}
+    \item \term{Self-supervised objective (next-token prediction)}:
+    \begin{itemize}
+        \item Model input \code{x = tokens[:, :-1]} covers positions \code{0} through \code{T-2}.
+        \item Ground-truth target \code{y = tokens[:, 1:]} covers positions \code{1} through \code{T-1}.
+        \item One sequence of length \code{T} yields \code{T - 1} supervised predictions simultaneously.
+    \end{itemize}
+    \item \term{Four phases of one training step}:
+    \begin{enumerate}
+        \item \term{Forward}: map \shape{[B, T]} token IDs to \shape{[B, T, V]} unnormalized scores called \defn{logits}, retaining intermediate activations needed for backpropagation.
+        \item \term{Loss}: compare the predicted distribution at every position \code{(b, t)} against the true next token \code{y[b, t]} using cross-entropy, producing one scalar loss.
+        \item \term{Backward}: traverse the computation graph in reverse to compute one gradient tensor per weight tensor.
+        \item \term{Optimizer step (AdamW)}: update every weight using the corresponding gradient and running moment estimates (\code{m} and \code{v}), then clear gradients.
+    \end{enumerate}
+    \item \term{Core systems property of training}:
+    \begin{itemize}
+        \item All \code{T} input tokens are known upfront.
+        \item Every linear projection multiplies a \shape{[B*T, D\_in]} matrix by a \shape{[D\_in, D\_out]} weight matrix, forming large General Matrix-Matrix Multiplications (GEMMs).
+        \item Training is therefore overwhelmingly \defn{compute-bound}: Tensor Cores stay saturated unless memory traffic or collectives stall execution.
+        \item \term{Contrast with Chapter 2}: autoregressive decoding generates one token at a time (\code{T = 1}), turning projections into tiny General Matrix-Vector Multiplications (GEMVs) that are \defn{memory-bandwidth-bound}.
+    \end{itemize}
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Inside a Transformer Block}
+
+\noindent\begin{minipage}{\linewidth}
+Modern LLMs (Qwen, DeepSeek, and Llama) share the same pre-norm decoder-only skeleton:
+\begin{lstlisting}
+tokens [B, T]
+  --> Token Embedding ---------------------------------> x [B, T, D]
+        --> Repeat L layers:
+              |-- RMSNorm --> Attention (token mixing) ----> + residual
+              |-- RMSNorm --> FFN or MoE (channel mixing) -> + residual
+        --> Final RMSNorm --> LM Head -----------------> logits [B, T, V]
+\end{lstlisting}
+\end{minipage}
+
+\begin{itemize}
+    \item \term{Root Mean Square Normalization (RMSNorm)}: rescales each token vector of length \code{D} to unit root-mean-square while preserving shape \shape{[B, T, D]}. RMSNorm skips mean subtraction and requires fewer memory reads than LayerNorm.
+    \item \term{Attention (mixing information across tokens)}:
+    \begin{itemize}
+        \item Linear projections produce queries \code{Q} \shape{[B, H\_q, T, d\_h]}, keys \code{K} \shape{[B, H\_kv, T, d\_h]}, and values \code{V} \shape{[B, H\_kv, T, d\_h]}.
+        \item \term{Rotary Position Embedding (RoPE)}: encodes token position by rotating adjacent channel pairs inside \code{Q} and \code{K} according to index \code{t}, adding zero learned parameters.
+        \item \term{Causal mask}: enforces that token \code{t} attends only to positions \code{0} through \code{t}, preventing access to future target tokens.
+        \item An output projection merges all attention heads back to \shape{[B, T, D]}.
+        \item \term{Three attention designs (determining Key-Value, KV, cache size in Chapter 2)}:
+        \begin{itemize}
+            \item \term{Multi-Head Attention (MHA)}: \code{H\_kv = H\_q}, yielding the largest \defn{Key-Value (KV) cache}.
+            \item \term{Grouped-Query Attention (GQA, Qwen2.5)}: \code{H\_kv < H\_q}, where multiple query heads share one KV head.
+            \item \term{Multi-head Latent Attention (MLA, DeepSeek-V3)}: projects K and V jointly into a compact latent vector (\code{d\_c = 512}) plus a decoupled RoPE key (\code{d\_r = 64}), expanding back to full heads on the fly during attention.
+        \end{itemize}
+    \end{itemize}
+    \item \term{Feed-Forward Network (FFN) and MoE (where most weights live)}:
+    \begin{itemize}
+        \item \term{Dense SwiGLU (Qwen2.5)}: two parallel up-projections expand \shape{[B, T, D]} to \shape{[B, T, D\_ff]}; an elementwise product applies the SiLU activation to the first branch and multiplies by the second; a down-projection maps back to \shape{[B, T, D]}. Every token executes 100\% of FFN weights.
+        \item \term{Sparse DeepSeekMoE (DeepSeek-V3, layers 4--61)}: a lightweight router projects each token \shape{[D]} to scores over \code{256} routed experts and selects the top \code{8}, alongside \code{1} always-active shared expert. Each expert is a small SwiGLU block (\code{D\_ff = 2048}); consequently, only \code{37B} of \code{671B} total parameters (5.5\%) execute per token.
+    \end{itemize}
+\end{itemize}
+
+\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y Y Y@{}}
+\toprule
+\term{Specification} & \code{tiny\_train.py} & \term{Qwen2.5-72B (Dense)} & \term{DeepSeek-V3 (MoE)} \\
+\midrule
+Total and active params & 443K total, 443K active & 72.7B total, 72.7B active & 671B total, 37B active \\
+Layers (\code{L}) & 2 & 80 & 61 (3 dense, 58 MoE) \\
+Hidden dim (\code{D}) & 128 & 8,192 & 7,168 \\
+Attention & GQA (4 Q, 2 KV) & GQA (64 Q, 8 KV) & MLA (128 heads, latent 512+64) \\
+FFN or experts & SwiGLU (\code{D\_ff=384}) & SwiGLU (\code{D\_ff=29,568}) & 1 shared, 256 routed (top-8, \code{D\_ff=2,048}) \\
+Vocab (\code{V}) & 192 (toy BPE) & 152,064 & 129,280 \\
+\bottomrule
+\end{tabularx}
+\end{minipage}\par\vspace{4pt}
+
+% -----------------------------------------------------------------------------
+\section{GPU Memory Accounting}
+
+Training High-Bandwidth Memory (HBM) divides into \defn{static state} (fixed by parameter count \code{P}) and \defn{dynamic activations} (scaling with batch size and context length).
+
+\subsection{Static State: 16-Byte Rule}
+
+\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
+\small
+\begin{tabularx}{\linewidth}{@{}l l c Y@{}}
+\toprule
+\term{Component} & \term{Precision} & \term{Bytes per Param} & \term{Role} \\
+\midrule
+Model weights & BF16 & 2 & Forward and backward GEMMs \\
+Gradients & BF16 & 2 & Output of backward pass \\
+Master weights & FP32 & 4 & Small updates underflow in BF16 \\
+AdamW 1st moment (\code{m}) & FP32 & 4 & Running mean of gradients \\
+AdamW 2nd moment (\code{v}) & FP32 & 4 & Running squared gradients \\
+\midrule
+\term{Total static floor} & Mixed & \term{16 $\times$ P} & \term{Required before batch size = 1} \\
+\bottomrule
+\end{tabularx}
+\end{minipage}\par\vspace{4pt}
+
+\begin{itemize}
+    \item \term{Capacity check on 1$\times$ NVIDIA H100 (94 GB HBM)}:
+    \begin{itemize}
+        \item \term{7B dense model}: \code{16 $\times$ 7B = 112 GB}, which triggers Out-Of-Memory (OOM) on a single 94 GB H100 before allocating activations.
+        \item \term{Qwen2.5-72B}: \code{16 $\times$ 72.7B $\approx$ 1.16 TB} of static state, requiring at least 13 to 16 H100 GPUs.
+        \item \term{DeepSeek-V3 (671B)}: \code{16 $\times$ 671B $\approx$ 10.7 TB} of static state, requiring more than 120 H100 GPUs.
+    \end{itemize}
+    \item \term{Takeaway}: 32-bit floating-point (FP32) master weights and optimizer states (12 bytes per parameter), rather than BF16 model weights (2 bytes per parameter), dominate training HBM.
+\end{itemize}
+
+\subsection{Dynamic Activations}
+
+\begin{itemize}
+    \item Backpropagation requires intermediate forward tensors (inputs to every linear layer, normalization, and nonlinearity).
+    \item Activation memory scales roughly with \code{B $\times$ T $\times$ L $\times$ D} and grows rapidly at long context lengths (\code{T = 32K} to \code{128K}).
+    \item \term{Two standard techniques in every production LLM trainer}:
+    \begin{enumerate}
+        \item \term{FlashAttention}: naive attention writes the \shape{[B, H, T, T]} score matrix to HBM, incurring quadratic memory and slow HBM round-trips. FlashAttention tiles \code{Q, K, V} into on-chip Static Random-Access Memory (SRAM, about 20 MB per H100), computes exact attention in one fused kernel, and avoids materializing \shape{[T, T]} in HBM, achieving linear memory and a 2$\times$ to 4$\times$ speedup.
+        \item \term{Activation checkpointing}: \defn{activation checkpointing} (recomputation) discards intra-layer activations during forward and retains only layer-boundary tensors, recomputing one layer's forward pass right before the corresponding backward pass. Checkpointing trades about 33\% extra compute for 5$\times$ to 10$\times$ lower activation HBM.
+    \end{enumerate}
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Mixed Precision: BF16 and FP8}
+
+\begin{itemize}
+    \item \term{NVIDIA H100 dense Tensor Core peak throughput (in trillion floating-point operations per second, TFLOPS)}:
+    \begin{itemize}
+        \item \code{FP32}: about 67 TFLOPS.
+        \item \code{BF16}: about 989 TFLOPS (15$\times$ higher compute, half the memory traffic).
+        \item \code{FP8}: about 1,979 TFLOPS (30$\times$ higher compute, one quarter of the memory traffic).
+    \end{itemize}
+    \item \term{Standard BF16 recipe (Qwen2.5)}:
+    \begin{itemize}
+        \item Forward and backward GEMMs run in \code{BF16}, which shares the FP32 exponent range and avoids the overflow and loss-scaling complexity of FP16.
+        \item Master weights, optimizer states, and gradient accumulation remain in \code{FP32}.
+    \end{itemize}
+    \item \term{DeepSeek-V3 FP8 mixed-precision recipe}:
+    \begin{itemize}
+        \item Runs nearly all GEMMs in \code{FP8 (E4M3)} while accumulating partial sums in \code{FP32} inside Tensor Cores.
+        \item \term{Failure mode of naive FP8}: outlier activation channels force a large per-tensor scale factor that underflows normal values to zero.
+        \item \term{Fine-grained block scaling}: assigns independent scale factors per \code{1 $\times$ 128} activation tile and per \code{128 $\times$ 128} weight block.
+        \item Sensitive components stay in BF16 or FP32: embeddings, LM head, MoE router, RMSNorm, and attention operators.
+        \item Optimizer moments (\code{m} and \code{v}) are stored in \code{BF16} rather than FP32 to cut static HBM further, while master weights remain in FP32.
+    \end{itemize}
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Five Axes of Parallelism}
+
+Every distributed training layout is characterized by three properties: the partitioned tensor dimension, the collective primitive, and the required physical interconnect:
+
+\par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y Y Y@{}}
+\toprule
+\term{Axis} & \term{Partitioned state} & \term{Collective and wire} & \term{Bottleneck and scope} \\
+\midrule
+\term{Data Parallelism (DP)} & Batch \code{B} & \code{AllReduce} gradients over InfiniBand (IB) or Ethernet & Replicates full \code{16P} state per GPU; does not relieve OOM \\
+\term{Zero Redundancy Optimizer (ZeRO) and FSDP} & Batch \code{B} plus sharded optimizer (Z1), gradients (Z2), or weights (Z3) & \code{AllGather} weights and \code{ReduceScatter} gradients over IB & Divides static HBM by \code{N\_dp}; Z1 has low overhead while Z3 adds weight traffic \\
+\term{Tensor Parallelism (TP)} & Matrix columns and rows (\code{D}, \code{D\_ff}, heads) & 2$\times$ \code{AllReduce} per layer over NVLink & Strictly intra-node (8 GPUs); stalls compute on slow links \\
+\term{Pipeline Parallelism (PP)} & Layers \code{L} across stages & Point-to-point \code{Send} and \code{Recv} activations over IB & Small transfer volume, cross-node friendly; incurs \defn{pipeline bubbles} \\
+\term{Expert Parallelism (EP)} & Distinct MoE experts across GPUs & 2$\times$ \code{All-to-All} per MoE layer (dispatch and combine) & Cross-node bandwidth and \defn{straggler GPUs} under unbalanced routing \\
+\bottomrule
+\end{tabularx}
+\end{minipage}\par\vspace{4pt}
+
+\begin{itemize}
+    \item \term{Interconnect matching rule}:
+    \begin{itemize}
+        \item Highest-bandwidth fabric (NVLink, 900 GB per second on H100 SXM): assign TP (dense models) or local EP.
+        \item Cross-node fabric (InfiniBand, about 50 GB per second per GPU): assign PP, DP with ZeRO-1, and overlapped EP.
+    \end{itemize}
+    \item \term{Context Parallelism (CP)}: for long sequences (\code{T = 64K} to \code{128K}), splits sequence length \code{T} across GPUs and circulates \code{K} and \code{V} blocks in a ring (Ring Attention) so no single GPU stores full-sequence activations.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{Case Studies: Qwen2.5 and DeepSeek-V3}
+
+\subsection{Qwen2.5-72B: Dense 3D Parallelism}
+\begin{itemize}
+    \item \term{Layout}: intra-node \code{TP}, inter-node \code{PP}, and \code{ZeRO-1 DP} (Fully Sharded Data Parallel, FSDP, provides an equivalent sharded layout).
+    \item \term{Execution profile}: every token executes identical dense GEMMs, yielding balanced GPU load, high Tensor Core utilization, and predictable collectives.
+    \item \term{Compute cost}: scales linearly with total parameters (about \code{6 $\times$ P} floating-point operations per training token, roughly 436 GFLOPs per token).
+\end{itemize}
+
+\subsection{DeepSeek-V3: 671B MoE at Scale}
+\begin{itemize}
+    \item \term{Cluster and budget}: trained on 2,048 H800 GPUs over 14.8 trillion tokens in about 2.79 million GPU-hours.
+    \item \term{Layout}: 16-way PP, 64-way EP (spanning 8 nodes), ZeRO-1 DP, and \code{TP = 1} (no Tensor Parallelism).
+    \item \term{Reason for dropping TP}: EP already drives heavy cross-node \code{All-to-All} traffic; setting \code{TP = 1} removes blocking per-layer \code{AllReduce} calls and simplifies local GEMMs.
+    \item \term{DualPipe (overlapping compute and communication)}:
+    \begin{itemize}
+        \item Feeds micro-batches from both ends of the pipeline simultaneously.
+        \item Every pipeline step overlaps one micro-batch's compute (Attention and MoE GEMMs) with another micro-batch's communication (\code{All-to-All} dispatch and combine plus PP \code{Send} and \code{Recv}).
+        \item Hides nearly all cross-node communication latency even on bandwidth-capped H800 interconnects.
+    \end{itemize}
+    \item \term{Auxiliary-loss-free MoE load balancing}:
+    \begin{itemize}
+        \item \defn{Routing collapse} overloads one GPU (straggler) while peer GPUs wait idle.
+        \item Rather than adding an auxiliary loss penalty (which harms language-modeling perplexity), DeepSeek adjusts a small dynamic bias on each expert's routing score after every step based on observed load.
+    \end{itemize}
+    \item \term{Multi-Token Prediction (MTP)}:
+    \begin{itemize}
+        \item Trains one extra lightweight head to predict \code{t+2} alongside \code{t+1}.
+        \item Provides denser training supervision at low compute cost and doubles as a free speculative-decoding drafter during inference.
+    \end{itemize}
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\section{From Training to Inference}
+
+Training produces a static checkpoint containing weights only, because gradients and AdamW states are discarded after training finishes. Every architectural choice made during training permanently constrains serving efficiency:
+
+\begin{itemize}
+    \item \term{Attention architecture sets the KV cache wall}:
+    \begin{itemize}
+        \item \term{Qwen2.5-72B} (GQA, 8 KV heads, 80 layers): \code{2 $\times$ 8 $\times$ 128 $\times$ 80 $\times$ 2 bytes} = 320 KB per token in BF16.
+        \item \term{DeepSeek-V3} (MLA, latent \code{512 + 64}, 61 layers): \code{576 $\times$ 61 $\times$ 2 bytes} = about 70 KB per token in BF16.
+        \item Despite holding 9.2$\times$ more total parameters, DeepSeek-V3 requires 4.5$\times$ less KV cache per token.
+    \end{itemize}
+    \item \term{Dense versus MoE trades memory footprint against compute}:
+    \begin{itemize}
+        \item Dense 72B holds about 145 GB of weights in BF16, fits on 2$\times$ H100 GPUs, and spends 72B-scale compute on every generated token.
+        \item MoE 671B holds about 671 GB of weights in FP8 and requires a full 8$\times$ H100 node just for weight residency, while executing only 37B active parameters per token.
+    \end{itemize}
+    \item \term{Post-training turns training into large-scale inference}:
+    \begin{itemize}
+        \item \term{Supervised Fine-Tuning (SFT)}: runs the same training loop on curated instruction and Chain-of-Thought (CoT) pairs, masking loss on prompt tokens.
+        \item \term{Group Relative Policy Optimization (GRPO, DeepSeek-R1)}: a Reinforcement Learning (RL) algorithm that samples \code{G} full completions per prompt (for example, \code{G = 16}), scores each completion with deterministic verifiers for math or code, and normalizes rewards within the group. Eliminating the separate critic model used by Proximal Policy Optimization (PPO) cuts RL memory by roughly 50\%.
+        \item \term{Systems consequence}: during RL post-training, 70\% to 85\% of wall-clock GPU time is spent generating \defn{rollouts}, meaning RL clusters spend most of their budget running an autoregressive inference engine.
+    \end{itemize}
+\end{itemize}

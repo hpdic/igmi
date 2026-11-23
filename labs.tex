@@ -1,0 +1,44 @@
+\documentclass[11pt, oneside]{book}
+
+\input{preamble}
+
+% Label chapters as "LAB 1", "LAB 2", ...
+\renewcommand{\chaptername}{Lab}
+\fancyhead[L]{\small\sffamily\color{igmi-muted}Introduction to Generative Machine Intelligence: Lab Manual}
+
+\begin{document}
+
+\frontmatter
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+    \vspace*{2.2cm}
+    {\sffamily\Huge\bfseries\color{igmi-accent} Introduction to Generative\\Machine Intelligence\par}
+    \vspace{0.5cm}
+    {\sffamily\LARGE\bfseries\color{igmi-muted} Companion Lab Manual\par}
+    \vspace{0.6cm}
+    {\sffamily\large\color{igmi-muted} Runnable PyTorch Examples, Execution Guides,\\and Measured Benchmarks on NVIDIA H100 and CPU\par}
+    \vspace{1.2cm}
+    {\color{igmi-rule}\rule{\linewidth}{0.8pt}}
+    \vspace{1.2cm}
+    {\sffamily\large Dongfang Zhao\par}
+    \vspace{0.2cm}
+    {\sffamily\normalsize\color{igmi-muted} \code{dzhao@cs.washington.edu}\par}
+    \vspace{0.15cm}
+    {\sffamily\normalsize\color{igmi-muted} \url{https://github.com/hpdic/igmi}\par}
+    \vfill
+    {\sffamily\footnotesize\color{igmi-muted} Author's personal lab notes, shared publicly as-is. No obligation to respond to issues or pull requests.\par}
+    \vspace{0.25cm}
+    {\sffamily\small\color{igmi-muted} Working Draft\par}
+\end{titlepage}
+\hypersetup{pageanchor=true}
+
+\tableofcontents
+
+\mainmatter
+\input{01-training/lab01}
+
+% Planned labs:
+% \input{02-autoregressive-inference/lab02}
+% \input{03-diffusion-llm/lab03}
+
+\end{document}
