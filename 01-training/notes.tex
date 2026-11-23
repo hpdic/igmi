@@ -16,9 +16,9 @@
 \begin{itemize}
     \item \term{Input}: text converted by a tokenizer into integer IDs of shape \shape{[B, T]}.
     \begin{itemize}
-        \item \code{B} = batch size (sequences processed together).
-        \item \code{T} = sequence length (tokens per sequence, typically \code{4,096}--\code{131,072}).
+        \item \code{B} = batch size (sequences processed together); \code{T} = sequence length (typically \code{4,096}--\code{131,072}).
         \item Vocabulary size \code{V}: \code{152,064} (Qwen2.5), \code{129,280} (DeepSeek-V3), \code{256} (our byte-level toy model).
+        \item \term{Tokenizer $\neq$ embedding $\neq$ neural encoder}: tokenization is a CPU string-to-ID rule (BPE, zero learned weights) producing plain scalar integers. Converting IDs to vectors happens next on GPU via \code{nn.Embedding(V, D)} --- a pure array lookup (\code{table[id]}) into a learned \shape{[V, D]} matrix ($\sim$2.49 GB in BF16 for Qwen2.5) that turns \shape{[B, T]} into \shape{[B, T, D]}. Pure-text LLMs are decoder-only; neural encoders are only needed for non-text modalities (images, audio).
     \end{itemize}
     \item \term{Self-supervised task (next-token prediction)}:
     \begin{itemize}
