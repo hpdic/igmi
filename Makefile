@@ -1,24 +1,21 @@
-NOTES_JOB = igmi
-LABS_JOB  = igmi-labs
-
 .PHONY: all notes labs clean distclean
 
-all: $(NOTES_JOB).pdf $(LABS_JOB).pdf
+all: igmi.pdf igmi-labs.pdf
 
-notes: $(NOTES_JOB).pdf
+notes: igmi.pdf
 
-labs: $(LABS_JOB).pdf
+labs: igmi-labs.pdf
 
-$(NOTES_JOB).pdf: main.tex preamble.tex $(wildcard */chap*.tex)
-	latexmk -pdf -g -interaction=nonstopmode -halt-on-error -jobname=$(NOTES_JOB) main.tex
+igmi.pdf: igmi.tex preamble.tex $(wildcard */chap*.tex)
+	latexmk -pdf -g -interaction=nonstopmode -halt-on-error igmi.tex
 
-$(LABS_JOB).pdf: labs.tex preamble.tex $(wildcard */lab*.tex)
-	latexmk -pdf -g -interaction=nonstopmode -halt-on-error -jobname=$(LABS_JOB) labs.tex
+igmi-labs.pdf: igmi-labs.tex preamble.tex $(wildcard */lab*.tex)
+	latexmk -pdf -g -interaction=nonstopmode -halt-on-error igmi-labs.tex
 
 clean:
-	latexmk -c -jobname=$(NOTES_JOB) main.tex
-	latexmk -c -jobname=$(LABS_JOB) labs.tex
-	rm -f $(NOTES_JOB).run.xml $(NOTES_JOB).synctex.gz $(LABS_JOB).run.xml $(LABS_JOB).synctex.gz
+	latexmk -c igmi.tex
+	latexmk -c igmi-labs.tex
+	rm -f igmi.run.xml igmi.synctex.gz igmi-labs.run.xml igmi-labs.synctex.gz
 
 distclean: clean
-	rm -f $(NOTES_JOB).pdf $(LABS_JOB).pdf
+	rm -f igmi.pdf igmi-labs.pdf

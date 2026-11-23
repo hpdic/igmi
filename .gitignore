@@ -24,8 +24,6 @@ __pycache__/
 *.synctex.gz
 *.toc
 *.xdv
-igmi.pdf
-igmi-labs.pdf
 
 # OS
 .DS_Store

@@ -22,7 +22,7 @@ Systems-first lecture notes (in LaTeX) on how modern generative AI models are tr
 | **02** | Autoregressive Inference: Prefill and Decode | `02-autoregressive-inference/chap02.tex` | `02-autoregressive-inference/lab02.tex` | Planned | Planned |
 | **03** | Diffusion-Based LLMs | `03-diffusion-llm/chap03.tex` | `03-diffusion-llm/lab03.tex` | Planned | Planned |
 
-*Lecture notes compile via [main.tex](main.tex) into `igmi.pdf`; hands-on lab guides and H100/CPU benchmarks compile via [labs.tex](labs.tex) into `igmi-labs.pdf`.*
+*Lecture notes compile via [igmi.tex](igmi.tex) into [igmi.pdf](igmi.pdf); hands-on lab guides and H100/CPU benchmarks compile via [igmi-labs.tex](igmi-labs.tex) into [igmi-labs.pdf](igmi-labs.pdf).*
 
 ## Build PDFs
 
