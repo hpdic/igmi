@@ -1,7 +1,30 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pt
 *.ckpt
-*.log
 .venv/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.lof
+*.log
+*.lot
+*.nav
+*.out
+*.run.xml
+*.snm
+*.synctex.gz
+*.toc
+*.xdv
+igmi.pdf
+
+# OS
 .DS_Store

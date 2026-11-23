@@ -1,6 +1,6 @@
 # Introduction to Generative Machine Intelligence (IGMI)
 
-Systems-first lecture notes on how modern generative AI models are trained and served.
+Systems-first lecture notes (in LaTeX) on how modern generative AI models are trained and served.
 
 ## Philosophy
 
@@ -14,15 +14,24 @@ Systems-first lecture notes on how modern generative AI models are trained and s
 
 ## Contents
 
-| Chapter | Topic | Notes | Code | Status |
+| Chapter | Topic | LaTeX Notes | Code | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **01** | LLM Training Systems | [01-training/notes.md](01-training/notes.md) | [tiny_train.py](01-training/code/tiny_train.py) | Draft |
-| **02** | Autoregressive LLM Inference (Prefill & Decode) | `02-autoregressive-inference/notes.md` | — | Planned |
-| **03** | Diffusion-Based LLMs | `03-diffusion-llm/notes.md` | — | Planned |
+| **01** | LLM Training Systems | [01-training/notes.tex](01-training/notes.tex) | [tiny_train.py](01-training/code/tiny_train.py) | Draft |
+| **02** | Autoregressive LLM Inference (Prefill & Decode) | `02-autoregressive-inference/notes.tex` | — | Planned |
+| **03** | Diffusion-Based LLMs | `03-diffusion-llm/notes.tex` | — | Planned |
 
-*Chapters are modular by design and will later split into dedicated sections (e.g., Encoder, Prefill, Decode, Multimodal).*
+*Chapters are modular (`\input{...}` in [main.tex](main.tex)) and will later split into dedicated sections (e.g., Encoder, Prefill, Decode, Multimodal).*
 
-## Quick Start
+## Build Lecture Notes (PDF)
+
+Requires TeX Live (`pdflatex` + `latexmk`).
+
+```bash
+make          # builds igmi.pdf
+make clean    # removes auxiliary LaTeX files
+```
+
+## Run Toy Examples
 
 Requires Python 3.10+ and PyTorch (`torch`).
 

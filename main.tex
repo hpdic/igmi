@@ -1,0 +1,36 @@
+\documentclass[11pt, oneside]{book}
+
+\input{preamble}
+
+\begin{document}
+
+\frontmatter
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+    \vspace*{2.2cm}
+    {\sffamily\Huge\bfseries\color{igmi-accent} Introduction to Generative\\Machine Intelligence\par}
+    \vspace{0.8cm}
+    {\sffamily\Large\color{igmi-muted} Systems-First Lecture Notes on LLM Training,\\Autoregressive Inference, and Diffusion LMs\par}
+    \vspace{1.2cm}
+    {\color{igmi-rule}\rule{\linewidth}{0.8pt}}
+    \vspace{1.2cm}
+    {\sffamily\large Dongfang Zhao\par}
+    \vspace{0.2cm}
+    {\sffamily\normalsize\color{igmi-muted} \code{dzhao@cs.washington.edu}\par}
+    \vspace{0.15cm}
+    {\sffamily\normalsize\color{igmi-muted} \url{https://github.com/hpdic/igmi}\par}
+    \vfill
+    {\sffamily\small\color{igmi-muted} Working Draft --- \today\par}
+\end{titlepage}
+\hypersetup{pageanchor=true}
+
+\tableofcontents
+
+\mainmatter
+\input{01-training/notes}
+
+% Planned chapters:
+% \input{02-autoregressive-inference/notes}
+% \input{03-diffusion-llm/notes}
+
+\end{document}
