@@ -2,6 +2,8 @@
 
 Systems-first lecture notes (in LaTeX) on how modern generative AI models are trained and served.
 
+> **Note**: This repository contains the author's personal lecture notes, shared publicly as-is. You are welcome to read and fork it, but the author is under no obligation to respond to issues, review pull requests, or provide support.
+
 ## Philosophy
 
 - **Real systems first, no intro chapter**: start directly with how an LLM trains and executes on hardware.
