@@ -11,7 +11,7 @@
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{The Core Loop: One Objective, Four Phases}
+\section{The Training Loop}
 
 \begin{itemize}
     \item \term{Input}: text converted by a tokenizer into integer IDs of shape \shape{[B, T]}.
@@ -43,7 +43,7 @@
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{Inside One Transformer Block (Tensor Shapes Only)}
+\section{Inside a Transformer Block}
 
 \noindent\begin{minipage}{\linewidth}
 Modern LLMs (Qwen, DeepSeek, Llama) share the same pre-norm decoder-only skeleton:
@@ -96,9 +96,10 @@ Vocab (\code{V}) & 256 (UTF-8 bytes) & 152,064 & 129,280 \\
 \end{minipage}\par\vspace{4pt}
 
 % -----------------------------------------------------------------------------
-\section{Toy Example Walkthrough (\code{code/tiny\_train.py})}
+\section{Minimal Runnable Example}
 
 \begin{itemize}
+    \item \term{File}: \code{01-training/code/tiny\_train.py}.
     \item \term{What it builds}:
     \begin{itemize}
         \item Raw UTF-8 byte tokenizer (\code{V = 256}), zero external tokenizer files.
@@ -122,11 +123,11 @@ python 01-training/code/tiny_train.py --device cpu
 \end{lstlisting}
 
 % -----------------------------------------------------------------------------
-\section{The Memory Bill: Why a Single H100 Runs Out of HBM Fast}
+\section{GPU Memory Accounting}
 
 Training HBM divides into \term{static state} (fixed by parameter count \code{P}) and \term{dynamic activations} (scales with batch size and context length).
 
-\subsection{Static State: The 16-Byte Rule (Mixed Precision + AdamW)}
+\subsection{Static State: The 16-Byte Rule}
 
 \par\vspace{4pt}\noindent\begin{minipage}{\linewidth}
 \small
@@ -155,7 +156,7 @@ AdamW 2nd moment (\code{v}) & FP32 & 4 & Running squared gradients \\
     \item \term{Takeaway}: \emph{optimizer states (12 bytes/param), not model weights (2 bytes/param), dominate training HBM.}
 \end{itemize}
 
-\subsection{Dynamic Activations (The Context-Length Spike)}
+\subsection{Dynamic Activations}
 
 \begin{itemize}
     \item Backward pass requires intermediate forward tensors (inputs to every linear layer, norm, and activation).
@@ -168,7 +169,7 @@ AdamW 2nd moment (\code{v}) & FP32 & 4 & Running squared gradients \\
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{Precision Engineering: BF16 vs.\ DeepSeek-V3's FP8}
+\section{Mixed Precision: BF16 and FP8}
 
 \begin{itemize}
     \item \term{NVIDIA H100 dense Tensor Core throughput}:
@@ -193,7 +194,7 @@ AdamW 2nd moment (\code{v}) & FP32 & 4 & Running squared gradients \\
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{Scaling Beyond One GPU: The 5 Parallelism Axes}
+\section{Five Axes of Parallelism}
 
 Think of every distributed training strategy by \term{what is split}, \term{what collective runs}, and \term{which physical wire it requires}:
 
@@ -222,17 +223,18 @@ Think of every distributed training strategy by \term{what is split}, \term{what
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{Running Examples Side-by-Side: Qwen2.5-72B vs.\ DeepSeek-V3}
+\section{Case Studies: Qwen2.5 vs.\ DeepSeek-V3}
 
-\subsection{Qwen2.5-72B (Classic Dense 3D Parallelism)}
+\subsection{Qwen2.5-72B: Dense 3D Parallelism}
 \begin{itemize}
     \item \term{Layout}: \code{TP} (intra-node) + \code{PP} (inter-node) + \code{ZeRO-1 DP}.
     \item \term{Execution profile}: every token executes identical dense GEMMs $\rightarrow$ balanced load, high Tensor Core utilization, predictable collectives.
     \item \term{Compute cost}: scales with total parameters ($\sim$6 $\times$ P FLOPs per training token $\approx$ 436 GFLOPs/token).
 \end{itemize}
 
-\subsection{DeepSeek-V3 (671B MoE on 2,048 H800 GPUs; 14.8T tokens, \texorpdfstring{$\sim$}{\textasciitilde}2.79M GPU-hours)}
+\subsection{DeepSeek-V3: 671B MoE at Scale}
 \begin{itemize}
+    \item \term{Cluster \& budget}: trained on 2,048 H800 GPUs over 14.8T tokens in $\sim$2.79M GPU-hours.
     \item \term{Layout}: \term{16-way PP + 64-way EP (across 8 nodes) + ZeRO-1 DP}, and \term{TP = 1 (no Tensor Parallelism)}.
     \item \term{Why drop TP completely?} EP already drives heavy cross-node \code{All-to-All} traffic; removing TP eliminates blocking per-layer \code{AllReduce} calls and simplifies local GEMMs.
     \item \term{DualPipe (overlapping compute and communication)}:
@@ -254,7 +256,7 @@ Think of every distributed training strategy by \term{what is split}, \term{what
 \end{itemize}
 
 % -----------------------------------------------------------------------------
-\section{Training Decisions That Lock In Inference (Bridge to Chapter 2)}
+\section{From Training to Inference}
 
 Training outputs a static checkpoint (weights only --- gradients and AdamW states are discarded). Every architectural decision made above permanently governs serving cost:
 
